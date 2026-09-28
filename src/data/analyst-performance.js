@@ -4,6 +4,7 @@ export const DEFAULT_PERFORMANCE_CONFIG = Object.freeze({
   staleBusinessDays: 3,
   lateReplanBusinessDays: 2,
   minimumSample: 5,
+  excludedStatuses: ['Tarefas pendentes'],
   weights: {
     completedCards: 15,
     originalDeadline: 20,
@@ -58,6 +59,19 @@ function clampScore(value) {
   return Math.max(0, Math.min(100, Math.round(value)));
 }
 
+function normalizeText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function isExcludedStatus(card, config = DEFAULT_PERFORMANCE_CONFIG) {
+  const status = normalizeText(card.status);
+  return (config.excludedStatuses || []).some(item => normalizeText(item) === status);
+}
+
 function rateScore(good, total) {
   if (!total) return null;
   return clampScore((good / total) * 100);
@@ -74,6 +88,16 @@ function rawChangelogItems(card) {
     from: item.fromString || item.from || '',
     to: item.toString || item.to || '',
   })));
+}
+
+function authorMatchesAnalyst(author, analyst = null) {
+  if (!analyst) return true;
+  const authorText = normalizeText(author);
+  if (!authorText) return false;
+  return [analyst.displayName, analyst.name, analyst.email, analyst.id]
+    .filter(Boolean)
+    .map(normalizeText)
+    .some(candidate => candidate && (authorText === candidate || authorText.includes(candidate) || candidate.includes(authorText)));
 }
 
 function isDueField(item) {
@@ -145,6 +169,41 @@ export function dueDateChanges(card) {
         classification: afterDue ? 'after_due' : late ? 'late' : 'planned',
       };
     });
+}
+
+function sprintKey(card) {
+  const sprint = card.sprint;
+  if (Array.isArray(sprint)) {
+    const last = sprint.filter(Boolean).at(-1);
+    if (!last) return 'Sem sprint informada';
+    return typeof last === 'object' ? String(last.id || last.name || last.state || 'Sem sprint informada') : String(last);
+  }
+  if (sprint && typeof sprint === 'object') return String(sprint.id || sprint.name || sprint.state || 'Sem sprint informada');
+  return String(sprint || 'Sem sprint informada');
+}
+
+function sprintDeliveryCapacity(cards) {
+  const groups = new Map();
+  cards.forEach(card => {
+    const key = sprintKey(card);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(card);
+  });
+  const rows = [...groups.entries()].map(([sprint, sprintCards]) => {
+    const done = sprintCards.filter(card => resolveStatusCategory(card.status) === StatusCategory.DONE);
+    return {
+      sprint,
+      cards: sprintCards,
+      done,
+      score: rateScore(done.length, sprintCards.length),
+    };
+  });
+  return {
+    rows,
+    total: cards.length,
+    done: rows.reduce((sum, row) => sum + row.done.length, 0),
+    score: cards.length ? clampScore(rows.reduce((sum, row) => sum + (row.score || 0) * row.cards.length, 0) / cards.length) : null,
+  };
 }
 
 export function dueDateHistory(card) {
@@ -226,31 +285,37 @@ export function classifyPerformance(score, config = DEFAULT_PERFORMANCE_CONFIG) 
 }
 
 export function calculateAnalystPerformance(cards, config = DEFAULT_PERFORMANCE_CONFIG) {
-  const done = cards.filter(card => resolveStatusCategory(card.status) === StatusCategory.DONE);
+  const mergedConfig = { ...DEFAULT_PERFORMANCE_CONFIG, ...config, weights: { ...DEFAULT_PERFORMANCE_CONFIG.weights, ...(config.weights || {}) } };
+  const eligibleCards = cards.filter(card => !isExcludedStatus(card, mergedConfig));
+  const done = eligibleCards.filter(card => resolveStatusCategory(card.status) === StatusCategory.DONE);
   const doneWithCurrentDue = done.filter(card => card.dueDate || card.plannedEndDate);
   const doneWithOriginalDue = done.filter(card => originalDueDate(card));
   const currentOnTime = doneWithCurrentDue.filter(card => deliveredOnOrBefore(card, card.dueDate || card.plannedEndDate));
   const originalOnTime = doneWithOriginalDue.filter(card => !dueDateChanges(card).length && deliveredOnOrBefore(card, originalDueDate(card)));
-  const stale = cards.filter(card => isStaleEligibleStatus(card.status) && card.updatedAt && businessDaysBetween(card.updatedAt, new Date()) > config.staleBusinessDays);
-  const commentsEligible = cards.filter(card => typeof card.humanCommentCount === 'number');
+  const stale = eligibleCards.filter(card => isStaleEligibleStatus(card.status) && card.updatedAt && businessDaysBetween(card.updatedAt, new Date()) > mergedConfig.staleBusinessDays);
+  const commentsEligible = eligibleCards.filter(card => typeof card.humanCommentCount === 'number');
   const commented = commentsEligible.filter(card => Number(card.humanCommentCount || 0) > 0);
-  const replans = cards.flatMap(card => dueDateChanges(card).map(change => ({ card, change })));
+  const replans = eligibleCards.flatMap(card => dueDateChanges(card)
+    .filter(change => authorMatchesAnalyst(change.author, mergedConfig.analyst))
+    .map(change => ({ card, change })));
   const lateReplans = replans.filter(item => item.change.classification === 'late' || item.change.classification === 'after_due');
-  const deliveryDelays = deliveryDelayEvents(cards);
-  const blockedEvents = historicalBlockedEvents(cards);
-  const reopened = cards.flatMap(card => reopenedEvents(card).map(event => ({ card, event })));
+  const deliveryDelays = deliveryDelayEvents(eligibleCards);
+  const blockedEvents = historicalBlockedEvents(eligibleCards);
+  const reopened = eligibleCards.flatMap(card => reopenedEvents(card).map(event => ({ card, event })));
   const avgOriginalDeviation = average(doneWithOriginalDue.map(card => businessDaysBetween(originalDueDate(card), card.resolvedAt)));
+  const capacity = sprintDeliveryCapacity(eligibleCards);
 
   const indicators = [
     {
       key: 'completedCards',
       category: 'Entrega',
-      label: 'Cards concluídos',
-      score: cards.length ? rateScore(done.length, cards.length) : null,
-      result: `${done.length} de ${cards.length}`,
-      weight: config.weights.completedCards,
+      label: 'Capacidade de entrega na sprint',
+      score: capacity.score,
+      result: `${capacity.done} de ${capacity.total}`,
+      weight: mergedConfig.weights.completedCards,
       cards: done,
-      formula: 'Cards concluídos / cards sob responsabilidade no período',
+      events: capacity.rows,
+      formula: 'Cards concluídos / cards atribuídos ao analista na sprint correspondente',
     },
     {
       key: 'originalDeadline',
@@ -258,7 +323,7 @@ export function calculateAnalystPerformance(cards, config = DEFAULT_PERFORMANCE_
       label: 'Entregas no primeiro prazo',
       score: rateScore(originalOnTime.length, doneWithOriginalDue.length),
       result: `${originalOnTime.length} de ${doneWithOriginalDue.length}`,
-      weight: config.weights.originalDeadline,
+      weight: mergedConfig.weights.originalDeadline,
       cards: originalOnTime,
       formula: 'Cards concluídos até a primeira Data Limite e sem postergação / cards concluídos com prazo original',
     },
@@ -266,9 +331,9 @@ export function calculateAnalystPerformance(cards, config = DEFAULT_PERFORMANCE_
       key: 'deliveryDelays',
       category: 'Entrega',
       label: 'Quantidade de atrasos nas entregas',
-      score: cards.length ? clampScore(100 - (new Set(deliveryDelays.map(item => item.card.id)).size / cards.length) * 100) : null,
+      score: eligibleCards.length ? clampScore(100 - (new Set(deliveryDelays.map(item => item.card.id)).size / eligibleCards.length) * 100) : null,
       result: `${deliveryDelays.length} atraso(s) em ${new Set(deliveryDelays.map(item => item.card.id)).size} cards`,
-      weight: config.weights.deliveryDelays,
+      weight: mergedConfig.weights.deliveryDelays,
       cards: deliveryDelays.map(item => item.card),
       events: deliveryDelays,
       formula: '100 - taxa de cards com prazo vencido em Itens pendentes ou Em andamento, mantendo histórico após alteração ou conclusão',
@@ -276,21 +341,21 @@ export function calculateAnalystPerformance(cards, config = DEFAULT_PERFORMANCE_
     {
       key: 'replanning',
       category: 'Previsibilidade',
-      label: 'Quantidade de alteração no prazo',
-      score: cards.length ? clampScore(100 - (new Set(replans.map(item => item.card.id)).size / cards.length) * 100) : null,
+      label: 'Quantidade de alterações na data limite',
+      score: eligibleCards.length ? clampScore(100 - (new Set(replans.map(item => item.card.id)).size / eligibleCards.length) * 100) : null,
       result: `${replans.length} alterações em ${new Set(replans.map(item => item.card.id)).size} cards`,
-      weight: config.weights.replanning,
+      weight: mergedConfig.weights.replanning,
       cards: replans.map(item => item.card),
       events: replans,
-      formula: '100 - taxa de cards com alteração de Data Limite',
+      formula: '100 - taxa de cards com alteração de Data Limite feita pelo próprio analista',
     },
     {
       key: 'blockedDeliveries',
       category: 'Gestão dos Cards',
       label: 'Quantidade de bloqueios nas entregas',
-      score: cards.length ? clampScore(100 - (new Set(blockedEvents.map(item => item.card.id)).size / cards.length) * 100) : null,
+      score: eligibleCards.length ? clampScore(100 - (new Set(blockedEvents.map(item => item.card.id)).size / eligibleCards.length) * 100) : null,
       result: `${blockedEvents.length} bloqueio(s) em ${new Set(blockedEvents.map(item => item.card.id)).size} cards`,
-      weight: config.weights.blockedDeliveries,
+      weight: mergedConfig.weights.blockedDeliveries,
       cards: blockedEvents.map(item => item.card),
       events: blockedEvents,
       formula: 'Conta entradas em status Bloqueado, mantendo histórico após desbloqueio',
@@ -304,7 +369,7 @@ export function calculateAnalystPerformance(cards, config = DEFAULT_PERFORMANCE_
       weight: 0,
       cards: lateReplans.map(item => item.card),
       events: lateReplans,
-      formula: 'Indicador auditável sem peso próprio; o impacto entra em Quantidade de alteração no prazo',
+      formula: 'Indicador auditável sem peso próprio; o impacto entra em Quantidade de alterações na data limite',
     },
     {
       key: 'reopened',
@@ -323,7 +388,7 @@ export function calculateAnalystPerformance(cards, config = DEFAULT_PERFORMANCE_
       label: 'Cobertura comentários',
       score: rateScore(commented.length, commentsEligible.length),
       result: `${commented.length} de ${commentsEligible.length}`,
-      weight: config.weights.commentCoverage,
+      weight: mergedConfig.weights.commentCoverage,
       cards: commentsEligible,
       formula: 'Cards com comentário humano / cards elegíveis',
     },
@@ -331,11 +396,11 @@ export function calculateAnalystPerformance(cards, config = DEFAULT_PERFORMANCE_
       key: 'staleCards',
       category: 'Gestão dos Cards',
       label: 'Atualização recente',
-      score: cards.length ? clampScore(100 - (stale.length / cards.length) * 100) : null,
-      result: `${stale.length} sem atualização recente de ${cards.length}`,
-      weight: config.weights.staleCards,
+      score: eligibleCards.length ? clampScore(100 - (stale.length / eligibleCards.length) * 100) : null,
+      result: `${stale.length} sem atualização recente de ${eligibleCards.length}`,
+      weight: mergedConfig.weights.staleCards,
       cards: stale,
-      formula: `100 - taxa de cards em andamento/bloqueados sem atualização há mais de ${config.staleBusinessDays} dias úteis; concluídos e itens pendentes não entram`,
+      formula: `100 - taxa de cards em andamento/bloqueados sem atualização há mais de ${mergedConfig.staleBusinessDays} dias úteis; concluídos e itens pendentes não entram`,
     },
   ];
 
@@ -353,7 +418,7 @@ export function calculateAnalystPerformance(cards, config = DEFAULT_PERFORMANCE_
 
   return {
     score,
-    label: classifyPerformance(score, config),
+    label: classifyPerformance(score, mergedConfig),
     indicators,
     categories,
     replans,
@@ -368,6 +433,7 @@ export function calculateAnalystPerformance(cards, config = DEFAULT_PERFORMANCE_
     avgOriginalDeviation,
     audit: {
       cards: cards.length,
+      eligibleCards: eligibleCards.length,
       done: done.length,
       doneWithCurrentDue: doneWithCurrentDue.length,
       doneWithOriginalDue: doneWithOriginalDue.length,
