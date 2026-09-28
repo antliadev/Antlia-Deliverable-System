@@ -46,6 +46,46 @@ test('performance note follows analyst score weights from Bruno notes', () => {
   assert.equal(validatePerformanceWeights().valid, true);
 });
 
+test('analyst performance ignores cards in Tarefas pendentes', () => {
+  const pending = { ...base, id: 'pending', key: 'P1-2', status: 'Tarefas pendentes', resolvedAt: null, humanCommentCount: 0 };
+  const result = calculateAnalystPerformance([base, pending]);
+  assert.equal(result.audit.cards, 2);
+  assert.equal(result.audit.eligibleCards, 1);
+  assert.equal(result.indicators.find(indicator => indicator.key === 'completedCards').result, '1 de 1');
+  assert.equal(result.indicators.find(indicator => indicator.key === 'commentCoverage').result, '1 de 1');
+});
+
+test('delivery capacity is calculated inside the corresponding sprint scope', () => {
+  const cards = [
+    { ...base, id: 's1-done', key: 'P1-1', sprint: { id: '10', name: 'Sprint 10' } },
+    { ...base, id: 's1-open', key: 'P1-2', status: 'Em andamento', resolvedAt: null, sprint: { id: '10', name: 'Sprint 10' } },
+    { ...base, id: 's2-done', key: 'P1-3', sprint: { id: '11', name: 'Sprint 11' } },
+  ];
+  const result = calculateAnalystPerformance(cards);
+  const capacity = result.indicators.find(indicator => indicator.key === 'completedCards');
+  assert.equal(capacity.label, 'Capacidade de entrega na sprint');
+  assert.equal(capacity.result, '2 de 3');
+  assert.equal(capacity.score, 67);
+  assert.deepEqual(capacity.events.map(row => row.sprint), ['10', '11']);
+});
+
+test('due date change indicator only counts changes made by the analyst', () => {
+  const card = {
+    ...base,
+    rawChangelog: {
+      histories: [
+        { id: 'h1', created: '2026-09-09T12:00:00Z', author: { displayName: 'Gestor' }, items: [{ field: 'duedate', fromString: '2026-09-10', toString: '2026-09-15' }] },
+        { id: 'h2', created: '2026-09-16T12:00:00Z', author: { displayName: 'Analista' }, items: [{ field: 'Data Limite', fromString: '2026-09-15', toString: '2026-09-20' }] },
+      ],
+    },
+  };
+  const result = calculateAnalystPerformance([card], { analyst: { displayName: 'Analista' } });
+  const replanning = result.indicators.find(indicator => indicator.key === 'replanning');
+  assert.equal(replanning.label, 'Quantidade de alterações na data limite');
+  assert.equal(result.replans.length, 1);
+  assert.equal(result.replans[0].change.author, 'Analista');
+});
+
 test('postponed due date never counts as delivered on first deadline', () => {
   const card = {
     ...base,

@@ -27,6 +27,32 @@ function jiraFieldText(value) {
   return jiraFieldText(value.value ?? value.displayName ?? value.name ?? value.label ?? value.child);
 }
 
+function jiraSprintValue(issue, rawFields = {}) {
+  const value = issue.sprint || issue.sprints || issue.sprint_name || issue.sprintName
+    || rawFields.sprint || rawFields.Sprint || rawFields.customfield_10020 || rawFields.customfield_10016 || null;
+  if (!value) return null;
+  if (Array.isArray(value)) return value.map(item => {
+    if (!item || typeof item !== 'object') return item;
+    return {
+      id: item.id || item.value || item.name || null,
+      name: item.name || item.value || item.id || '',
+      state: item.state || '',
+      startDate: item.startDate || item.start_date || null,
+      endDate: item.endDate || item.end_date || null,
+    };
+  });
+  if (typeof value === 'object') {
+    return {
+      id: value.id || value.value || value.name || null,
+      name: value.name || value.value || value.id || '',
+      state: value.state || '',
+      startDate: value.startDate || value.start_date || null,
+      endDate: value.endDate || value.end_date || null,
+    };
+  }
+  return String(value);
+}
+
 export class DataService {
   constructor() {
     this._projects = [];
@@ -814,7 +840,7 @@ export class DataService {
         actionTaken: i.blocked_action_taken || jiraFieldText(rawFields.customfield_11377) || 'Nenhuma acao registrada',
         pendingWith: i.blocked_pending_with || jiraFieldText(rawFields.customfield_11376) || 'Nao informado',
         integrationWarnings: i.integration_warnings || [],
-        sprint: null,
+        sprint: jiraSprintValue(i, rawFields),
         storyPoints,
         labels: i.labels || [],
         components: i.components || [],

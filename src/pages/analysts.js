@@ -9,11 +9,12 @@ import { isCardOverdue, resolveStatusCategory, StatusCategory } from '../data/mo
 import { formatDate, sanitize, sanitizeTitle, typeLabel } from '../utils/helpers.js';
 import { exportRowsWorkbook } from '../utils/excel-export.js';
 import { businessHelp } from '../utils/ui-feedback.js';
-import { calculateAnalystPerformance } from '../data/analyst-performance.js';
+import { DEFAULT_PERFORMANCE_CONFIG, calculateAnalystPerformance, validatePerformanceWeights } from '../data/analyst-performance.js';
 import { renderMultiSelect } from '../utils/multi-select.js';
 
 const MIN_SAMPLE_KEY = 'rja.analysts.minimumSample';
 const SHARED_ANALYST_KEY = 'rja.analysts.sharedUserId';
+const PERFORMANCE_WEIGHTS_KEY = 'rja.analysts.performanceWeights';
 
 let comparisonProfessionalsOpen = false;
 let analystDetailGroups = {};
@@ -141,8 +142,30 @@ function baseCards({ userId = '', projectId = '', status = '', type = '', start 
     .filter(card => dateInRange(card.updatedAt || cardEndDate(card), start, end));
 }
 
+function isAnalystPendingStatus(card) {
+  return String(card.status || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase() === 'tarefas pendentes';
+}
+
+function analystPerformanceWeights() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(PERFORMANCE_WEIGHTS_KEY) || '{}');
+    const weights = Object.fromEntries(Object.entries(DEFAULT_PERFORMANCE_CONFIG.weights).map(([key, fallback]) => [key, Number(stored[key] ?? fallback)]));
+    return validatePerformanceWeights(weights).valid ? weights : DEFAULT_PERFORMANCE_CONFIG.weights;
+  } catch {
+    return DEFAULT_PERFORMANCE_CONFIG.weights;
+  }
+}
+
+function analystPerformanceConfig(user) {
+  return {
+    ...DEFAULT_PERFORMANCE_CONFIG,
+    analyst: user,
+    weights: analystPerformanceWeights(),
+  };
+}
+
 function calcAnalystMetrics(user, filters = {}) {
-  const cards = baseCards({ ...filters, userId: user.id });
+  const cards = baseCards({ ...filters, userId: user.id }).filter(card => !isAnalystPendingStatus(card));
   const current = cards.filter(card => resolveStatusCategory(card.status) !== StatusCategory.DONE);
   const done = cards.filter(card => resolveStatusCategory(card.status) === StatusCategory.DONE);
   const withDue = cards.filter(card => cardEndDate(card));
@@ -209,6 +232,20 @@ function metricButton({ key, tone = '', title, help, value, label, trend = '' })
   `;
 }
 
+function renderPerformanceWeightConfig(performance) {
+  const labels = Object.fromEntries((performance?.indicators || []).map(indicator => [indicator.key, indicator.label]));
+  const weights = analystPerformanceWeights();
+  return `
+    <details class="health-weight-config analyst-weight-config">
+      <summary>Configurar pesos da nota</summary>
+      <div class="health-weight-fields">
+        ${Object.entries(weights).map(([key, value]) => `<label>${sanitize(labels[key] || key)}<input data-analyst-weight="${sanitize(key)}" type="number" min="0" max="100" value="${value}"></label>`).join('')}
+        <button class="btn btn-secondary" id="save-analyst-weights">Aplicar pesos</button>
+      </div>
+    </details>
+  `;
+}
+
 function header(title, subtitle) {
   document.getElementById('page-header').innerHTML = `
     <div>
@@ -252,7 +289,7 @@ function renderGeneral() {
     return;
   }
   const m = selectedUser ? calcAnalystMetrics(selectedUser, filters) : null;
-  const performance = m ? calculateAnalystPerformance(m.cards) : null;
+  const performance = m ? calculateAnalystPerformance(m.cards, analystPerformanceConfig(selectedUser)) : null;
   const staleCards = performance?.indicators.find(indicator => indicator.key === 'staleCards')?.cards || m?.stale || [];
   analystDetailGroups = selectedUser && performance ? {
     current: m.current.map(card => ({ card, detail: 'Responsabilidade atual' })),
@@ -262,7 +299,7 @@ function renderGeneral() {
     blockedEvents: performance.blockedEvents.map(item => ({ card: item.card, detail: `Bloqueado em ${formatDate(item.event.at)}` })),
     commentCoverage: m.cards.filter(card => Number(card.humanCommentCount || 0) > 0).map(card => ({ card, detail: 'Possui comentario humano' })),
     stale: staleCards.map(card => ({ card, detail: 'Sem atualizacao recente' })),
-    replans: performance.replans.map(item => ({ card: item.card, detail: `Prazo alterado de ${item.change.previousDate || '-'} para ${item.change.newDate || '-'}` })),
+    replans: performance.replans.map(item => ({ card: item.card, detail: `Data limite alterada por ${item.change.author || 'Não informado'} de ${item.change.previousDate || '-'} para ${item.change.newDate || '-'}` })),
   } : {};
   const selectedIds = selectedUser ? [selectedUser.id] : [];
   if (selectedUserId) persistSharedAnalyst(selectedUserId);
@@ -279,6 +316,7 @@ function renderGeneral() {
         <label>Tipo<select id="analyst-type">${typeOptions(filters.type)}</select></label>
         <button class="btn btn-secondary" id="analyst-clear">Limpar filtros</button>
         <button class="btn btn-secondary" id="analyst-export" ${selectedUser ? '' : 'disabled'}>Excel</button>
+        ${selectedUser ? renderPerformanceWeightConfig(performance) : ''}
       </div>
 
       ${!selectedUser ? '<div class="empty-state"><h3>Selecione um profissional para visualizar os indicadores individuais.</h3></div>' : `
@@ -297,13 +335,13 @@ function renderGeneral() {
         <div class="kpi-card kpi-info">${businessHelp('Regra: nota de performance', 'Nota de 0 a 100 calculada por score normalizado de cada indicador vezes seu peso. Indicadores sem dados saem do denominador para evitar nota inventada.')}<div class="kpi-value">${performance.score ?? 'N/A'}</div><div class="kpi-label">Nota de Performance</div><div class="kpi-trend">${sanitize(performance.label)}</div></div>
         <div class="kpi-card">${businessHelp('Regra: projetos em atuação', 'Quantidade de projetos que possuem cards atribuídos ao profissional no período analisado.')}<div class="kpi-value">${m.projects.length}</div><div class="kpi-label">Projetos em atuacao</div></div>
         ${metricButton({ key: 'current', title: 'cards sob responsabilidade', help: 'Cards atuais atribuídos ao profissional, excluindo os que estão concluídos.', value: m.current.length, label: 'Cards sob responsabilidade' })}
-        ${metricButton({ key: 'done', tone: 'kpi-success', title: 'cards concluídos', help: 'Cards do profissional classificados como Concluído.', value: m.done.length, label: 'Cards concluidos' })}
+        ${metricButton({ key: 'done', tone: 'kpi-success', title: 'capacidade de entrega na sprint', help: 'Capacidade de concluir os cards atribuídos ao analista dentro da sprint correspondente. Cards em Tarefas pendentes não entram na conta.', value: percentLabel(performance.indicators.find(indicator => indicator.key === 'completedCards')?.score), label: 'Capacidade de entrega na sprint', trend: `${m.done.length} de ${m.cards.length} card(s)` })}
         ${metricButton({ key: 'onTime', title: 'entregas no prazo', help: 'Percentual de cards concluídos até o primeiro prazo. Se a Data Limite foi postergada, a entrega não entra como no prazo original.', value: percentLabel(performance.originalOnTimeRate ?? m.onTimeRate), label: 'Entregas no prazo' })}
         ${metricButton({ key: 'deliveryDelays', tone: 'kpi-danger', title: 'quantidade de atrasos nas entregas', help: 'Quantidade de vezes em que um prazo venceu enquanto o card estava em Itens pendentes ou Em andamento. O histórico é mantido mesmo após alteração de data ou conclusão.', value: performance.deliveryDelays.length, label: 'Quantidade de atrasos nas entregas', trend: `${uniqueCards(performance.deliveryDelays.map(item => item.card)).length} card(s)` })}
         ${metricButton({ key: 'blockedEvents', tone: 'kpi-warning', title: 'quantidade de bloqueios nas entregas', help: 'Quantidade de vezes em que o card entrou em Bloqueado. O histórico é mantido mesmo depois do desbloqueio.', value: performance.blockedEvents.length, label: 'Quantidade de bloqueios nas entregas', trend: `${uniqueCards(performance.blockedEvents.map(item => item.card)).length} card(s)` })}
         ${metricButton({ key: 'commentCoverage', title: 'cobertura de comentários', help: 'Percentual de cards com pelo menos um comentário humano, quando os comentários estão disponíveis.', value: percentLabel(m.commentCoverage), label: 'Cobertura comentarios' })}
         ${metricButton({ key: 'stale', title: 'sem atualização recente', help: 'Cards em andamento ou bloqueados cuja última atualização ocorreu há mais de três dias úteis. Concluídos e Itens pendentes não entram.', value: staleCards.length, label: 'Sem atualizacao recente' })}
-        ${metricButton({ key: 'replans', title: 'quantidade de alteração no prazo', help: 'Quantidade de alterações na Data Limite, mantendo histórico para medir previsibilidade.', value: performance.replans.length, label: 'Quantidade de alteracao no prazo', trend: `${uniqueCards(performance.replans.map(item => item.card)).length} card(s)` })}
+        ${metricButton({ key: 'replans', title: 'quantidade de alterações na data limite', help: 'Quantidade de alterações na Data Limite feitas pelo próprio analista, mantendo histórico para medir previsibilidade.', value: performance.replans.length, label: 'Quantidade de alteracoes na data limite', trend: `${uniqueCards(performance.replans.map(item => item.card)).length} card(s)` })}
       </div>
 
       <section class="report-section">
@@ -406,13 +444,13 @@ function showAnalystDetailModal(key) {
   const rows = analystDetailGroups[key] || [];
   const labels = {
     current: 'Cards sob responsabilidade',
-    done: 'Cards concluidos',
+    done: 'Capacidade de entrega na sprint',
     onTime: 'Entregas no prazo',
     deliveryDelays: 'Quantidade de atrasos nas entregas',
     blockedEvents: 'Quantidade de bloqueios nas entregas',
     commentCoverage: 'Cards com comentarios',
     stale: 'Sem atualizacao recente',
-    replans: 'Quantidade de alteracao no prazo',
+    replans: 'Quantidade de alteracoes na data limite',
   };
   document.querySelector('.ui-modal-backdrop[data-analyst-detail-modal]')?.remove();
   const modal = document.createElement('div');
@@ -468,6 +506,16 @@ function bindGeneral(selectedUser) {
   });
   document.getElementById('analyst-export')?.addEventListener('click', () => {
     if (selectedUser) exportAnalystGeneral(selectedUser);
+  });
+  document.getElementById('save-analyst-weights')?.addEventListener('click', () => {
+    const weights = Object.fromEntries([...document.querySelectorAll('[data-analyst-weight]')].map(input => [input.dataset.analystWeight, Number(input.value)]));
+    const validation = validatePerformanceWeights(weights);
+    if (!validation.valid) {
+      alert(`A soma dos pesos deve ser exatamente 100%. Soma atual: ${validation.total}%.`);
+      return;
+    }
+    localStorage.setItem(PERFORMANCE_WEIGHTS_KEY, JSON.stringify(weights));
+    renderGeneral();
   });
   document.querySelectorAll('[data-analyst-detail]').forEach(button => {
     const open = event => {
