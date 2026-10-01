@@ -83,6 +83,8 @@ function rawChangelogItems(card) {
     id: `${history.id || history.created || 'history'}:${index}`,
     at: history.created || null,
     author: history.author?.displayName || history.author?.name || 'Não informado',
+    authorId: history.author?.accountId || history.author?.account_id || null,
+    authorEmail: history.author?.emailAddress || history.author?.email || null,
     field: item.field || '',
     fieldId: item.fieldId || '',
     from: item.fromString || item.from || '',
@@ -90,14 +92,38 @@ function rawChangelogItems(card) {
   })));
 }
 
-function authorMatchesAnalyst(author, analyst = null) {
+function identityMatchesAnalyst(candidate = {}, analyst = null) {
   if (!analyst) return true;
-  const authorText = normalizeText(author);
-  if (!authorText) return false;
-  return [analyst.displayName, analyst.name, analyst.email, analyst.id]
+  const candidateIds = [candidate.id, candidate.accountId, candidate.account_id].filter(Boolean).map(value => String(value).trim());
+  const analystIds = [analyst.id, analyst.accountId, analyst.account_id].filter(Boolean).map(value => String(value).trim());
+  if (candidateIds.length && analystIds.length && candidateIds.some(id => analystIds.includes(id))) return true;
+
+  const candidateTexts = [candidate.displayName, candidate.name, candidate.email, candidate.emailAddress]
     .filter(Boolean)
-    .map(normalizeText)
-    .some(candidate => candidate && (authorText === candidate || authorText.includes(candidate) || candidate.includes(authorText)));
+    .map(normalizeText);
+  const analystTexts = [analyst.displayName, analyst.name, analyst.email, analyst.emailAddress]
+    .filter(Boolean)
+    .map(normalizeText);
+  return candidateTexts.some(left => analystTexts.some(right => left && right && (left === right || left.includes(right) || right.includes(left))));
+}
+
+function authorMatchesAnalyst(change, analyst = null) {
+  return identityMatchesAnalyst({
+    id: change.authorId,
+    accountId: change.authorId,
+    displayName: change.author,
+    email: change.authorEmail,
+  }, analyst);
+}
+
+function cardHasHumanCommentByAnalyst(card, analyst = null) {
+  if (!analyst) return Number(card.humanCommentCount || 0) > 0;
+  if (!Number(card.humanCommentCount || 0)) return false;
+  return identityMatchesAnalyst({
+    id: card.lastHumanCommentAuthorId,
+    accountId: card.lastHumanCommentAuthorId,
+    displayName: card.lastHumanCommentAuthorName,
+  }, analyst);
 }
 
 function isDueField(item) {
@@ -294,9 +320,9 @@ export function calculateAnalystPerformance(cards, config = DEFAULT_PERFORMANCE_
   const originalOnTime = doneWithOriginalDue.filter(card => !dueDateChanges(card).length && deliveredOnOrBefore(card, originalDueDate(card)));
   const stale = eligibleCards.filter(card => isStaleEligibleStatus(card.status) && card.updatedAt && businessDaysBetween(card.updatedAt, new Date()) > mergedConfig.staleBusinessDays);
   const commentsEligible = eligibleCards.filter(card => typeof card.humanCommentCount === 'number');
-  const commented = commentsEligible.filter(card => Number(card.humanCommentCount || 0) > 0);
+  const commented = commentsEligible.filter(card => cardHasHumanCommentByAnalyst(card, mergedConfig.analyst));
   const replans = eligibleCards.flatMap(card => dueDateChanges(card)
-    .filter(change => authorMatchesAnalyst(change.author, mergedConfig.analyst))
+    .filter(change => authorMatchesAnalyst(change, mergedConfig.analyst))
     .map(change => ({ card, change })));
   const lateReplans = replans.filter(item => item.change.classification === 'late' || item.change.classification === 'after_due');
   const deliveryDelays = deliveryDelayEvents(eligibleCards);
@@ -390,7 +416,7 @@ export function calculateAnalystPerformance(cards, config = DEFAULT_PERFORMANCE_
       result: `${commented.length} de ${commentsEligible.length}`,
       weight: mergedConfig.weights.commentCoverage,
       cards: commentsEligible,
-      formula: 'Cards com comentário humano / cards elegíveis',
+      formula: 'Cards com comentário humano do próprio analista / cards elegíveis',
     },
     {
       key: 'staleCards',
