@@ -146,6 +146,18 @@ function isAnalystPendingStatus(card) {
   return String(card.status || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase() === 'tarefas pendentes';
 }
 
+function normalizeIdentity(value) {
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+}
+
+function cardHasHumanCommentByAnalyst(card, user) {
+  if (!Number(card.humanCommentCount || 0)) return false;
+  if (card.lastHumanCommentAuthorId && user?.id) return String(card.lastHumanCommentAuthorId) === String(user.id);
+  const author = normalizeIdentity(card.lastHumanCommentAuthorName);
+  const analyst = normalizeIdentity(user?.displayName);
+  return Boolean(author && analyst && (author === analyst || author.includes(analyst) || analyst.includes(author)));
+}
+
 function analystPerformanceWeights() {
   try {
     const stored = JSON.parse(localStorage.getItem(PERFORMANCE_WEIGHTS_KEY) || '{}');
@@ -184,10 +196,7 @@ function calcAnalystMetrics(user, filters = {}) {
     return businessDaysLate(card.updatedAt) > 5;
   });
   const commentsAvailable = hasHumanCommentsAvailable();
-  const commentedCards = commentsAvailable ? cards.filter(card => {
-    const raw = (dataService.getRawJiraData()?.issues || []).find(issue => issue.issue_id === card.id);
-    return Number(raw?.human_comment_count || 0) > 0;
-  }) : [];
+  const commentedCards = commentsAvailable ? cards.filter(card => cardHasHumanCommentByAnalyst(card, user)) : [];
   const commentCoverage = commentsAvailable ? Math.round((commentedCards.length / Math.max(1, cards.length)) * 100) : null;
   const onTimeRate = doneWithDue.length ? Math.round((onTime.length / doneWithDue.length) * 100) : null;
   const delayRate = withDue.length ? Math.round((overdue.length / withDue.length) * 100) : null;
@@ -291,13 +300,15 @@ function renderGeneral() {
   const m = selectedUser ? calcAnalystMetrics(selectedUser, filters) : null;
   const performance = m ? calculateAnalystPerformance(m.cards, analystPerformanceConfig(selectedUser)) : null;
   const staleCards = performance?.indicators.find(indicator => indicator.key === 'staleCards')?.cards || m?.stale || [];
+  const commentIndicator = performance?.indicators.find(indicator => indicator.key === 'commentCoverage') || null;
+  const commentedCards = commentIndicator?.cards?.filter(card => cardHasHumanCommentByAnalyst(card, selectedUser)) || [];
   analystDetailGroups = selectedUser && performance ? {
     current: m.current.map(card => ({ card, detail: 'Responsabilidade atual' })),
     done: m.done.map(card => ({ card, detail: 'Concluido' })),
     onTime: (performance.originalOnTimeCards || m.onTime).map(card => ({ card, detail: 'Entregue dentro do prazo original' })),
     deliveryDelays: performance.deliveryDelays.map(item => ({ card: item.card, detail: `Venceu em ${formatDate(item.dueDate)} com status ${item.statusAtDueDate}` })),
     blockedEvents: performance.blockedEvents.map(item => ({ card: item.card, detail: `Bloqueado em ${formatDate(item.event.at)}` })),
-    commentCoverage: m.cards.filter(card => Number(card.humanCommentCount || 0) > 0).map(card => ({ card, detail: 'Possui comentario humano' })),
+    commentCoverage: commentedCards.map(card => ({ card, detail: `Comentário do próprio analista${card.lastHumanCommentAt ? ` em ${formatDate(card.lastHumanCommentAt)}` : ''}` })),
     stale: staleCards.map(card => ({ card, detail: 'Sem atualizacao recente' })),
     replans: performance.replans.map(item => ({ card: item.card, detail: `Data limite alterada por ${item.change.author || 'Não informado'} de ${item.change.previousDate || '-'} para ${item.change.newDate || '-'}` })),
   } : {};
@@ -339,7 +350,7 @@ function renderGeneral() {
         ${metricButton({ key: 'onTime', title: 'entregas no prazo', help: 'Percentual de cards concluídos até o primeiro prazo. Se a Data Limite foi postergada, a entrega não entra como no prazo original.', value: percentLabel(performance.originalOnTimeRate ?? m.onTimeRate), label: 'Entregas no prazo' })}
         ${metricButton({ key: 'deliveryDelays', tone: 'kpi-danger', title: 'quantidade de atrasos nas entregas', help: 'Quantidade de vezes em que um prazo venceu enquanto o card estava em Itens pendentes ou Em andamento. O histórico é mantido mesmo após alteração de data ou conclusão.', value: performance.deliveryDelays.length, label: 'Quantidade de atrasos nas entregas', trend: `${uniqueCards(performance.deliveryDelays.map(item => item.card)).length} card(s)` })}
         ${metricButton({ key: 'blockedEvents', tone: 'kpi-warning', title: 'quantidade de bloqueios nas entregas', help: 'Quantidade de vezes em que o card entrou em Bloqueado. O histórico é mantido mesmo depois do desbloqueio.', value: performance.blockedEvents.length, label: 'Quantidade de bloqueios nas entregas', trend: `${uniqueCards(performance.blockedEvents.map(item => item.card)).length} card(s)` })}
-        ${metricButton({ key: 'commentCoverage', title: 'cobertura de comentários', help: 'Percentual de cards com pelo menos um comentário humano, quando os comentários estão disponíveis.', value: percentLabel(m.commentCoverage), label: 'Cobertura comentarios' })}
+        ${metricButton({ key: 'commentCoverage', title: 'cobertura de comentários', help: 'Percentual de cards com pelo menos um comentário humano feito pelo próprio analista responsável.', value: percentLabel(commentIndicator?.score), label: 'Cobertura comentarios' })}
         ${metricButton({ key: 'stale', title: 'sem atualização recente', help: 'Cards em andamento ou bloqueados cuja última atualização ocorreu há mais de três dias úteis. Concluídos e Itens pendentes não entram.', value: staleCards.length, label: 'Sem atualizacao recente' })}
         ${metricButton({ key: 'replans', title: 'quantidade de alterações na data limite', help: 'Quantidade de alterações na Data Limite feitas pelo próprio analista, mantendo histórico para medir previsibilidade.', value: performance.replans.length, label: 'Quantidade de alteracoes na data limite', trend: `${uniqueCards(performance.replans.map(item => item.card)).length} card(s)` })}
       </div>

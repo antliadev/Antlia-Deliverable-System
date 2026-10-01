@@ -86,6 +86,33 @@ test('due date change indicator only counts changes made by the analyst', () => 
   assert.equal(result.replans[0].change.author, 'Analista');
 });
 
+test('due date change indicator matches analyst by Jira account id when names differ', () => {
+  const card = {
+    ...base,
+    rawChangelog: {
+      histories: [
+        { id: 'h1', created: '2026-09-25T12:00:00Z', author: { accountId: 'hector-id', displayName: 'Hector nelson' }, items: [{ field: 'duedate', fromString: '2026-09-25', toString: '2026-10-02' }] },
+      ],
+    },
+  };
+  const result = calculateAnalystPerformance([card], { analyst: { id: 'hector-id', displayName: 'Hector Nelson Silva' } });
+  assert.equal(result.replans.length, 1);
+  assert.equal(result.indicators.find(indicator => indicator.key === 'replanning').result, '1 alterações em 1 cards');
+});
+
+test('comment coverage only counts human comments made by the analyst', () => {
+  const cards = [
+    { ...base, id: 'own-comment', key: 'P1-1', humanCommentCount: 1, lastHumanCommentAuthorId: 'analyst-id', lastHumanCommentAuthorName: 'Analista' },
+    { ...base, id: 'other-comment', key: 'P1-2', humanCommentCount: 1, lastHumanCommentAuthorId: 'manager-id', lastHumanCommentAuthorName: 'Gestor' },
+    { ...base, id: 'no-comment', key: 'P1-3', humanCommentCount: 0, lastHumanCommentAuthorId: null, lastHumanCommentAuthorName: null },
+  ];
+  const result = calculateAnalystPerformance(cards, { analyst: { id: 'analyst-id', displayName: 'Analista' } });
+  const indicator = result.indicators.find(item => item.key === 'commentCoverage');
+  assert.equal(indicator.score, 33);
+  assert.equal(indicator.result, '1 de 3');
+  assert.equal(indicator.formula, 'Cards com comentário humano do próprio analista / cards elegíveis');
+});
+
 test('postponed due date never counts as delivered on first deadline', () => {
   const card = {
     ...base,
