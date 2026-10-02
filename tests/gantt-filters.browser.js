@@ -24,6 +24,11 @@ try {
     dataService.getCardById = id => cards.find(card => card.id === id);
     dataService.getProjectById = id => dataService.getProjects().find(project => project.id === id);
     dataService.getUserById = id => dataService.getUsers().find(user => user.id === id);
+    dataService.startScopedJiraSync = async scope => {
+      window.__ganttSyncScope = scope;
+      return { jobId: null };
+    };
+    dataService.ensureLoaded = async () => {};
     (await import('/src/pages/gantt.js')).renderGantt();
     (await import('/src/utils/select-list.js')).initSelectLists();
   });
@@ -51,6 +56,12 @@ try {
   assert.equal(await page.locator('[data-card-id="3"].gantt-bar.overdue').count(), 1);
   assert.equal(await page.locator('[data-card-id="4"].gantt-bar.review-overdue').count(), 1);
   assert.equal(await page.locator('.gantt-toolbar').evaluate(el => Number(getComputedStyle(el).zIndex) > Number(getComputedStyle(document.querySelector('.gantt-summary-bar')).zIndex || 0)), true);
+  await page.click('#gantt-refresh-jira');
+  await page.waitForFunction(() => window.__ganttSyncScope);
+  assert.deepEqual(
+    await page.evaluate(() => window.__ganttSyncScope.issueKeys),
+    ['A-1', 'A-2', 'A-3']
+  );
   await page.screenshot({ path: '/tmp/gantt-filters.png', fullPage: true });
   assert.deepEqual(errors, []);
   console.log('Browser passed: filtro dependente, combinacao e camada da toolbar acima dos KPIs.');

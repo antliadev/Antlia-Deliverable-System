@@ -38,6 +38,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const LS_PREFIX = 'gantt.';
 const GANTT_INITIAL_LIMIT = 300;
 const GANTT_INCREMENT = 300;
+const GANTT_SYNC_ISSUE_KEY_LIMIT = 250;
 const DEFAULT_PREFS = {
   leftColWidth: 400,
   colWidths: {
@@ -312,6 +313,16 @@ function getScheduleMetrics(items) {
 function isCanceledCard(card) {
   const status = String(card.status || '').toLowerCase();
   return status.includes('cancel') || status.includes('cancelad');
+}
+
+function issueKeysForSync(items) {
+  return [...new Set((items || []).map(item => item.card?.key).filter(Boolean))].sort();
+}
+
+function scopedIssueKeysForRefresh() {
+  if (!getActiveFilterCount()) return [];
+  const keys = issueKeysForSync(state.filteredItems);
+  return keys.length <= GANTT_SYNC_ISSUE_KEY_LIMIT ? keys : [];
 }
 
 function getEpicCompletion(epic, allItems) {
@@ -2042,6 +2053,8 @@ async function refreshGanttData() {
       if (project?.key) scope.projectKey = project.key;
     }
     if (state.analystId) scope.assigneeId = state.analystId;
+    const issueKeys = scopedIssueKeysForRefresh();
+    if (issueKeys.length) scope.issueKeys = issueKeys;
     const started = await dataService.startScopedJiraSync(scope);
     const jobId = started?.jobId || started?.job?.id;
     let completed = !jobId;
