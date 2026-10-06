@@ -46,7 +46,8 @@ test('dashboard agrupa por competencia e epic/aplicacao sem solicitante', () => 
   assert.equal(result.capacity.availableHours, 98.5);
   assert.deepEqual(result.hoursByApplication, [{ application: 'Integracao API', name: 'Integracao API', seconds: 5400, hours: 1.5 }]);
   assert.equal(result.details[0].activityDescription, 'Validacao');
-  assert.equal(result.monthlyConsumption.length, 2);
+  assert.equal(result.monthlyConsumption.length, 3);
+  assert.equal(result.monthlyConsumption.some(item => item.competence === '2026-10' && item.allowanceHours === 150), true);
   assert.equal('hoursByRequester' in result, false);
   assert.equal('ticketsByRequester' in result, false);
   assert.equal(result.usedHours, 1.5);
@@ -151,7 +152,7 @@ test('Docwise acumula consumo entre competencias e Crawford reinicia mensalmente
   assert.equal(crawfordAugust.availableHours, 95);
 });
 
-test('Crawford aplica capacidade contratual por competencia em agosto e setembro de 2026', () => {
+test('Crawford aplica capacidade contratual por competencia entre agosto e outubro de 2026', () => {
   const worklogs = [
     { worklog_id: 'c1', issue_key: 'CRAWFORD-10', started_at: '2026-08-18T14:00:00.000Z', time_spent_seconds: 30 * 60 },
     { worklog_id: 'c2', issue_key: 'CRAWFORD-10', started_at: '2026-08-20T16:21:00.000Z', time_spent_seconds: 4 * 3600 },
@@ -181,10 +182,10 @@ test('Crawford aplica capacidade contratual por competencia em agosto e setembro
   assert.equal(september.availableHours, 175.5);
   assert.equal(september.utilizationPercent, 0);
   assert.equal(september.monthlyHistory.some(item => item.competence === '2026-09' && item.allowanceHours === 200), true);
-  assert.equal(october.allowanceHours, 100);
+  assert.equal(october.allowanceHours, 150);
   assert.equal(october.usedHours, 2);
   assert.equal(october.accountableUsedHours, 2);
-  assert.equal(october.availableHours, 98);
+  assert.equal(october.availableHours, 148);
 });
 
 test('Docwise separa horas do mesmo card pela data do apontamento', () => {
